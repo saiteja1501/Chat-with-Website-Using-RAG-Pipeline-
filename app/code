@@ -1,0 +1,73 @@
+import os
+from typing import List
+from urllib.parse import urlparse
+import requests
+from bs4 import BeautifulSoup
+import numpy as np
+from sentence_transformers import SentenceTransformer
+from langchain.vectorstores import FAISS
+from langchain.embeddings import OpenAIEmbeddings
+from langchain.chains import RetrievalQA
+from langchain.llms import OpenAI
+
+class RAGPipeline:
+    def __init__(self, embedding_model_name: str = "all-MiniLM-L6-v2", vector_db_path: str = "vector_db"):
+        self.embedding_model = SentenceTransformer(embedding_model_name)
+        self.vector_db_path = vector_db_path
+        self.vector_store = None
+        self._initialize_vector_db()
+
+    def _initialize_vector_db(self):
+        if os.path.exists(self.vector_db_path):
+            self.vector_store = FAISS.load_local(self.vector_db_path, OpenAIEmbeddings())
+        else:
+            self.vector_store = FAISS(OpenAIEmbeddings(), [])
+
+    def crawl_and_scrape(self, urls: List[str]) -> List[str]:
+        content_chunks = []
+        for url in urls:
+            try:
+                response = requests.get(url)
+                if response.status_code == 200:
+                    soup = BeautifulSoup(response.content, 'html.parser')
+                    text = soup.get_text(separator=" ", strip=True)
+                    chunks = self._split_text_into_chunks(text)
+                    content_chunks.extend(chunks)
+            except Exception as e:
+                print(f"Error crawling {url}: {e}")
+        return content_chunks
+
+    def _split_text_into_chunks(self, text: str, chunk_size: int = 500) -> List[str]:
+        words = text.split()
+        return [' '.join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
+
+    def add_data_to_vector_db(self, content_chunks: List[str], metadata: dict = None):
+        embeddings = self.embedding_model.encode(content_chunks)
+        self.vector_store.add_documents(
+            documents=content_chunks,
+            embeddings=embeddings,
+            metadata=metadata
+        )
+        self.vector_store.save_local(self.vector_db_path)
+
+    def query(self, user_query: str) -> str:
+        query_embedding = self.embedding_model.encode([user_query])
+        relevant_docs = self.vector_store.similarity_search(query_embedding, k=5)
+        llm = OpenAI(temperature=0.0)
+        retrieval_qa = RetrievalQA(llm=llm, retriever=self.vector_store.as_retriever())
+        response = retrieval_qa.run(user_query)
+        return response
+
+if __name__ == "__main__":
+    # Initialize the pipeline
+    pipeline = RAGPipeline()
+
+    # Step 1: Data Ingestion
+    urls = ["https://example.com"]
+    content_chunks = pipeline.crawl_and_scrape(urls)
+    pipeline.add_data_to_vector_db(content_chunks)
+
+    # Step 2: Query Handling
+    user_query = "What is the content of the website?"
+    response = pipeline.query(user_query)
+    print("Response:", response)
